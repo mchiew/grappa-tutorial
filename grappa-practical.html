@@ -1,0 +1,360 @@
+<h1 id="grappaparallelimagingtutorial">GRAPPA Parallel Imaging Tutorial</h1>
+
+<p>Mark Chiew (mchiew@fmrib.ox.ac.uk)</p>
+
+<h2 id="introduction">Introduction</h2>
+
+<p>Parallel imaging, broadly speaking, refers to the use of multi-channel receive coil information to reconstruct under-sampled data.
+It is called "parallel" because the set of receive channels all acquire data "in parallel" - i.e., they all record at the same time.
+GRAPPA (Griswold et al., MRM 2002) is one of the most popular techniques for performing parallel imaging reconstruction, among many.
+Others include SENSE (Pruessmann et al., MRM 1999) and ESPIRiT (Uecker et al., MRM 2014), </p>
+
+<p>So, in this tutorial, we'll go over the basics of <em>what</em> GRAPPA does, and <em>how</em> to do it.
+What we won't cover is <em>why</em> GRAPPA, or parallel imaging works. I refer you to one of the many review papers on Parallel Imaging.</p>
+
+<h2 id="thegrappaproblem">The GRAPPA Problem</h2>
+
+<h3 id="problemdefinition">Problem Definition</h3>
+
+<p>First, this is an example of the type of problem we are trying to solve:</p>
+
+<pre><code>Coil #1 k-space    Coil #2 k-space
+
+oooooooooooooooo   oooooooooooooooo
+----------------   ----------------
+oooooooooooooooo   oooooooooooooooo             o : Acquired k-space data point
+----------------   ----------------             - : Missing k-space data
+oooooooooooooooo   oooooooooooooooo
+----------------   ----------------
+oooooooooooooooo   oooooooooooooooo
+----------------   ----------------
+oooooooooooooooo   oooooooooooooooo
+----------------   ----------------
+oooooooooooooooo   oooooooooooooooo
+----------------   ----------------
+</code></pre>
+
+<p>The acquisition above is missing every other line <code>(R=2)</code>. To generate our output images, we will need to fill in these missing lines.
+GRAPPA gives us a set of steps to fill in these missing lines. We do this by using a weighted combination of surrounding points, from all coils.</p>
+
+<h3 id="overview">Overview</h3>
+
+<p>Here's what this practical will help you with:</p>
+
+<ol>
+<li>Understanding and defining GRAPPA kernel geometries</li>
+
+<li>Learning how to construct the GRAPPA synthesis problem as a linear system</li>
+
+<li>Learning how to estimate the kernel weights needed to perform GRAPPA reconstruction</li>
+</ol>
+
+<h3 id="stepbystep">Step-by-Step</h3>
+
+<p>Let's consider one of the missing points we want to reconstruct, from coil 1, denoted <code>X</code>:</p>
+
+<pre><code>Coil #1 k-space    Coil #2 k-space
+
+oooooooooooooooo   oooooooooooooooo
+----------------   ----------------
+oooooooooooooooo   oooooooooooooooo             o : Acquired k-space data point
+----------------   ----------------             - : Missing k-space data
+oooooooooooooooo   oooooooooooooooo
+--------X-------   ----------------             X : Reconstruction Target
+oooooooooooooooo   oooooooooooooooo
+----------------   ----------------
+oooooooooooooooo   oooooooooooooooo
+----------------   ----------------
+oooooooooooooooo   oooooooooooooooo
+----------------   ----------------
+</code></pre>
+
+<p>To recover the target point <code>X</code>, we need to choose a local neighbourhood of surrounding acquired points, as well as the "parallel" neighbourhoods of the other coils.</p>
+
+<pre><code>Coil #1 k-space    Coil #2 k-space
+
+oooooooooooooooo   oooooooooooooooo
+----------------   ----------------
+oooooooooooooooo   oooooooooooooooo             o : Acquired k-space data point
+----------------   ----------------             - : Missing k-space data
+ooooooo***oooooo   ooooooo***oooooo
+--------X-------   --------Y-------             X : Reconstruction target
+ooooooo***oooooo   ooooooo***oooooo             Y : Reconstruction target position in other coils
+----------------   ----------------
+oooooooooooooooo   oooooooooooooooo             * : Neighbourhood sources
+----------------   ----------------
+oooooooooooooooo   oooooooooooooooo
+----------------   ----------------
+</code></pre>
+
+<p>We chose a neighbourhood, or "kernel" of 3 points in the x-direction, and 2 points in the y-direction, centred on the target position. 
+These source points come from the same coil as the target point, as well as in the same locations from the other parallel coils.
+Zooming in on the target point, and its sources:</p>
+
+<pre><code>Coil #1 k-space    Coil #2 k-space
+
+   *   *   *          *   *   *
+                                                X : Reconstruction target
+   -   X   -          -   Y   -                 Y : Reconstruction target position in other coils
+
+   *   *   *          *   *   *                 * : Neighbourhood sources
+</code></pre>
+
+<p>We can see that there are 3x2=6 source points per coil. This is generally referred to as a 3x2 kernel geometry.
+If we label all the source points in this 2-coil example:</p>
+
+<pre><code>Coil #1 k-space    Coil #2 k-space
+
+   a   b   c          g   h   i
+                                                X : Reconstruction target
+   -   X   -          -   Y   -                 Y : Reconstruction target position in other coils
+
+   d   e   f          j   k   l                 [a-l] : Source points
+</code></pre>
+
+<p>The GRAPPA weighted combination formulation means that:</p>
+
+<pre><code>X = wx_a*a + wx_b*b + wx_c*c + ... + wx_l*l;    {Eq. 1a}
+</code></pre>
+
+<p>where <code>wx_n</code> refers to the weight for source n, and <code>a-l</code> are the complex k-space data points.
+While the kernels are shift-invariant over the entire k-space, they are specific to the target coils.</p>
+
+<p>Therefore, to reconstruct target point Y in the second coil, a different set of weights are required:</p>
+
+<pre><code>Y = wy_a*a + wy_b*b + wy_c*c + ... + wy_l*l;    {Eq. 1b}
+</code></pre>
+
+<p>So, for example, if you have 8 coils, using 3x2 kernel geometries, you will have 8x6 different kernel
+weights, where the entire group of weights for all coils is called the kernel or weight set.</p>
+
+<p>If we write this as a matrix equation, we can see that:</p>
+
+<pre><code>M = W*S;                                        {Eq. 2a}
+or
+[X]   [wx_a wx_b wx_c ... wx_l] [a]
+[Y]   [wy_a wy_b wy_c ... wy_l] [b]
+ .  = [           .           ] [c]             {Eq. 2b}
+ .    [           .           ] [d]
+[Z]   [wz_a wz_b wz_c ... wz_l] [e]
+                                [.]
+                                [.]
+                                [.]
+                                [l]
+</code></pre>
+
+<p>where <code>M=(X,Y,...Z)'</code> are the missing points from each coil, <code>W</code> is the kernel weight matrix where each coil's weights comprise one row.
+<code>S</code> is a vector of source points - order is not important, but it is critical to ensure it is consistent with the weights.</p>
+
+<p>Finally, this expression only holds for a fixed kernel geometry (i.e. source - target geometry). For <code>R &gt; 2</code> (i.e. <code>R-1</code> missing lines for each measured line),
+there will be <code>R-1</code> distinct kernel sets. </p>
+
+<p>For example, in the case of <code>R=3</code>, you have 2 distinct kernel geometries to work with:</p>
+
+<pre><code>Coil #1 k-space    Coil #2 k-space
+
+oooooooooooooooo   oooooooooooooooo
+----------------   ----------------
+----------------   ----------------             o : Acquired k-space data point
+oooooooooooooooo   oooooooooooooooo             - : Missing k-space data
+----------------   ----------------
+----------------   ----------------             ---                     ooo
+oooooooooooooooo   oooooooooooooooo             ooo First kernel        --- Second kernel
+-------X--------   ----------------             -X- geometry            -Y- geometry
+-------Y--------   ----------------             ---                     ooo
+oooooooooooooooo   oooooooooooooooo             ooo                     ---
+----------------   ----------------
+----------------   ----------------
+</code></pre>
+
+<p>If you want to generalise this to <code>R &gt; 2</code>, ultimately, for <code>C</code> coils, with kernel size <code>[Nx,Ny]</code>, and acceleration factor <code>R</code>, in totality, 
+you will need to estimate <code>C*(R-1)*C*Nx*Ny</code> weight coefficients. You can solve this as a single comprehensive system, or because the problems are uncoupled,
+you may find it easier to solve each <code>(R-1)</code> class of sub-problems separately.</p>
+
+<p>So Eq. 2 completely describes how you solve for missing points, given acquired data in some neighbourhood around it.</p>
+
+<p>The one final piece of information we need is fully sampled "calibration" or "training" data, so that we can actually find the kernel weights.
+To do this, we simply solve Eq. 2 for the weights, typically in a least-squares sense (no pun intended), over the calibration data.
+In this case, M and S are both matrices, containing known information, representing source-target relationships across the entire calibration region.</p>
+
+<p>This is what "fitting the kernel" refers to:</p>
+
+<pre><code>W = M*pinv(S);                                  {Eq. 3a}
+or
+W = M*S'*(S*S')^-1;                             {Eq. 3a}
+</code></pre>
+
+<p>To ensure a robust and well-conditioned fit, typically a relatively large calibration region is used fit <code>W</code>.
+Over the calibration data, nearly every point is a potential source and target. Because all the points are present,
+we can use this data to learn the shift-invariant geometric relationships in the k-space x coil data.</p>
+
+<pre><code>Coil #1 k-space    Coil #2 k-space
+
+oooooooooooooooo   oooooooooooooooo
+oooooooooooooooo   oooooooooooooooo
+oooooooooooooooo   oooooooooooooooo             o : Acquired k-space calibration data
+oooooooooooooooo   oooooooooooooooo             
+oooooooooooooooo   oooooooooooooooo
+oooooooooooooooo   oooooooooooooooo
+oooooooooooooooo   oooooooooooooooo
+oooooooooooooooo   oooooooooooooooo
+oooooooooooooooo   oooooooooooooooo
+oooooooooooooooo   oooooooooooooooo
+oooooooooooooooo   oooooooooooooooo
+oooooooooooooooo   oooooooooooooooo
+</code></pre>
+
+<p>So to solve Eq. 3, we "move" the kernel over the entire calibration space, and for every source-target pairing, we get an additional 
+column in <code>M</code> and <code>S</code>:</p>
+
+<pre><code>Coil #1 k-space    Coil #2 k-space
+
+   a1  b1  c1  -      g1  h1  i1  -             [X1]   [wx_a wx_b wx_c ... wx_l] [a1]
+                                                [Y1]   [wy_a wy_b wy_c ... wy_l] [b1]
+   -   X1  -   -      -   Y1  -   -             [ .] = [           .           ] [c1]            
+                                                [ .]   [           .           ] [d1]
+   d1  e1  f1  -      j1  k1  l1  -             [Z1]   [wz_a wz_b wz_c ... wz_l] [e1]
+                                                                                 [ .] 
+   -   -   -   -      -   -   -   -                                              [ .]      
+                                                                                 [l1]
+
+Coil #1 k-space    Coil #2 k-space
+
+   -   a2  b2  c2     -   g2  h2  i2            [X1 X2]   [wx_a wx_b wx_c ... wx_l] [a1 a2]
+                                                [Y1 Y2]   [wy_a wy_b wy_c ... wy_l] [b1 b2]
+   -   -   X2  -      -   -   Y2  -             [ .  .] = [           .           ] [c1 c2]            
+                                                [ .  .]   [           .           ] [d1 d2]
+   -   d2  e2  f2     -   j2  k2  l2            [Z1 Z2]   [wz_a wz_b wz_c ... wz_l] [e1 e2]
+                                                                                    [ .  .]
+   -   -   -   -      -   -   -   -                                                 [ .  .]
+                                                                                    [l1 l2]
+
+Coil #1 k-space    Coil #2 k-space
+
+   -   -   -   -      -   -   -   -             [X1 X2 ... Xn]   [wx_a wx_b wx_c ... wx_l] [a1 a2 ... an]
+                                                [Y1 Y2 ... Yn]   [wy_a wy_b wy_c ... wy_l] [b1 b2 ... bn]
+   -   an  bn  cn     -   gn  hn  in            [ .  . ...  .] = [           .           ] [c1 c2 ... cn]            
+                                                [ .  . ...  .]   [           .           ] [d1 d2 ... dn]
+   -   -   Xn  -      -   -   Yn  -             [Z1 Z2 ... Zn]   [wz_a wz_b wz_c ... wz_l] [e1 e2 ... en]
+                                                                                           [ .  . ...  .]
+   -   dn  en  fn     -   jn  kn  ln                                                       [ .  . ...  .]
+                                                                                           [l1 l2 ... ln]
+</code></pre>
+
+<p>Now that you have <code>M</code> and <code>S</code> fully populated, you can solve Eq. 3 in the least squares sense, by pseudo-inverting <code>S</code>:</p>
+
+<pre><code>   [wx_a wx_b wx_c ... wx_l]    [X1 X2 ... Xn]       [a1 a2 ... an]
+   [wy_a wy_b wy_c ... wy_l]    [Y1 Y2 ... Yn]       [b1 b2 ... bn]
+   [           .           ] =  [ .  . ...  .] *pinv([c1 c2 ... cn])    Eq. {4}
+   [           .           ]    [ .  . ...  .]       [d1 d2 ... dn]
+   [wz_a wz_b wz_c ... wz_l]    [Z1 Z2 ... Zn]       [e1 e2 ... en]
+                                                     [ .  . ...  .]
+                                                     [ .  . ...  .]
+                                                     [l1 l2 ... ln]
+</code></pre>
+
+<h3 id="summary">Summary</h3>
+
+<p>Ultimately, the entire GRAPPA algorithm boils down to:</p>
+
+<ol>
+<li>Choosing desired kernel geometries</li>
+
+<li>Solving Eq. 3 to fit for <code>W</code> over the calibration data</li>
+
+<li>Applying Eq. 2 to solve for <code>M</code>, using the calibrated <code>W</code>, over the actual under-sampled data</li>
+</ol>
+
+<h2 id="practical">Practical</h2>
+
+<p>Now that you have a basic sense of the internal logic behind GRAPPA (the <em>what</em>), we'll get into a step-by-step practical on
+how to actually go through the mechanics of writing a GRAPPA-based image reconstruction program (the <em>how</em>).</p>
+
+<p>I've included skeleton code for each step, that you're free to use if you like. I've also included a full working step-by-step solution if
+you get stuck on any step. Use as much or as little of the provided solution as you like.</p>
+
+<p>At the end of the tutorial, I'll just briefly walk through my solution code.</p>
+
+<h3 id="step1organisingthereconstructioncode">Step 1 - Organising the reconstruction code</h3>
+
+<p>Source file: <code>grappa.m</code></p>
+
+<p>We'll use <code>grappa.m</code> as our main function that takes in undersampled data and returns reconstructed data. 
+We'll also be defining separate functions for most of the other steps, and the provided <code>grappa.m</code> file is already organised this way for you.
+I recommend you use the provided <code>grappa.m</code> file.</p>
+
+<h3 id="step2paddatatodealwithkernelsappliedatkspaceboundaries">Step 2 - Pad data to deal with kernels applied at k-space boundaries</h3>
+
+<p>Source files: <code>grappa_get_pad.m</code>, <code>grappa_pad_data.m</code>, <code>grappa_unpad_data.m</code></p>
+
+<p>We need to pad the k-space data that we're working with in order to accommodate kernels being applied at the boundary of the actual data.
+Because the kernels extend for some width beyond the target point, if the reconstruction target is at the edge, the kernel will necessarily
+need to grab data from beyond.</p>
+
+<p>This is organised into 2 parts:
+<code>grappa_get_pad.m</code> should return you the size of padding needed in each dimension given your kernel size and under-sampling factor
+<code>grappa_pad_data.m</code> should perform the padding operation 
+<code>grappa_unpad_data.m</code> should perform the un-padding operation</p>
+
+<h3 id="step3computerelativeindicesforsourcepointsrelativetotarget">Step 3 - Compute relative indices for source points relative to target</h3>
+
+<p>Source file: <code>grappa_get_indices.m</code></p>
+
+<p>This is in my opinion the trickiest part of the practical GRAPPA problem. In order to perform weight estimation and application, you
+will need to be able to know what the co-ordinates are of every source point relative to its target point. It's not difficult to picture
+in your head, but making sure you've got your indexing correct is pretty crucial. </p>
+
+<p>You will need to return an array of source indices, where each column is paired with the corresponding element in the target index vector.
+I use linear indexing for this (i.e., I index the 3D data arrays from 1 to C<em>Nx</em>Ny linearly, instead of using subscripts).</p>
+
+<p>I <em>strongly</em> recommend simply using the provided solution, unless you're feeling particularly keen. In my solution, for simplicity, I require that
+the kernel size be odd in the kx-direction, and even in the ky-direction. </p>
+
+<h3 id="step4performweightestimation">Step 4 - Perform weight estimation</h3>
+
+<p>Source file: <code>grappa_estimate_weights.m</code></p>
+
+<p>Given paired set of source and target indices, you must now use those to collect corresponding dataset pairs from the calibration k-space
+in order to perform weight estimation. Don't forget that the weights must map data from <em>all</em> coils to the target points in <em>each</em> coil.</p>
+
+<p>You can do whatever you like here, if you know what you're doing. Otherwise, I recommend you perform a least squares fit.
+The easiest way to do that, is to recognise that this is simply a linear regression problem as laid out above, and use the pseudoinverse (pinv in MATLAB)
+Eq. {4} is basically what you should get.</p>
+
+<p>The way I have structured my solution is to estimate weights for each of the R-1 missing line groups (or kernel geometries) separately.
+This makes the organisation a bit simpler, and is mathematically equivalent to solving for all weight sets at once. Feel free to try to implement
+the all-in-one approach if you have extra time.</p>
+
+<h3 id="step5applyweightstoreconstructmissingdata">Step 5 - Apply weights to reconstruct missing data</h3>
+
+<p>Source file: <code>grappa_apply_weights.m</code></p>
+
+<p>Finally, the weights estimated need to be used to reconstruct missing data. Here you also need to identify source and target indices from the
+actual under-sampled data, and then use the weights you derive to solve the reconstruction problem (Eq. {2}).</p>
+
+<p>Again, depending on whether you separated the weight estimation into R-1 subproblems or one big problem, you will need to either loop over
+all your subproblems to get the final reconstruction, or simply apply your weights to all missing points at once.</p>
+
+<h3 id="step6testreconstructions">Step 6 - Test Reconstructions</h3>
+
+<p>Source file: <code>example.m</code></p>
+
+<p>To evaluate your reconstruction, I have provided a simple script and some data that perform some toy under-sampling problems.
+If you've implemented <code>grappa.m</code> and everything else correctly, this should run and give you the expected outputs.</p>
+
+<h3 id="bonussteps">Bonus Steps</h3>
+
+<p>Using this exact framework, it is relatively simple to perform the following extensions:
+(I have code for these, they're all in some form or another on psg.fmrib.ox.ac.uk/u/mchiew/projects)</p>
+
+<ul>
+<li>Regularised GRAPPA (Tikhonov, PRUNO/ESPIRiT-style SVD-truncation)</li>
+
+<li>SENSE-style image-based reconstruction using "sensitivities" derived from Fourier Transforming the GRAPPA kernel</li>
+
+<li>Analytical g-factor maps derived from the GRAPPA kernel</li>
+
+<li>2D GRAPPA (under-sampling in both directions, with and without CAIPI-style sampling)</li>
+
+<li>Slice-GRAPPA and Split-Slice-GRAPPA multi-band slice separation </li>
+</ul>
